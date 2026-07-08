@@ -8,7 +8,6 @@ const PORT_RANGE_START = parseInt(process.env.PORT_RANGE_START || 9000);
 const PORT_RANGE_END = parseInt(process.env.PORT_RANGE_END || 9100);
 const BASE_DOMAIN = process.env.BASE_DOMAIN || 'local.test';
 const HTTPS_ENABLED = process.env.HTTPS_ENABLED === 'true';
-const CADDY_PORT = parseInt(process.env.CADDY_PORT || 8080);
 
 const wss = new WebSocket.Server({ port: SIGNALING_PORT });
 const clientTunnels = new Map(); // Maps publicPort -> { ws, publicServer, subdomain }
@@ -16,15 +15,7 @@ const subdomainMap = new Map(); // Maps subdomain -> publicPort
 
 const caddy = new CaddyManager({
     baseDomain: BASE_DOMAIN,
-    caddyPort: CADDY_PORT,
     httpsEnabled: HTTPS_ENABLED
-});
-
-caddy.start();
-
-process.on('SIGINT', () => {
-    caddy.stop();
-    process.exit();
 });
 
 wss.on('connection', (ws) => {
@@ -117,11 +108,11 @@ function handleTunnelRequest(ws, requestedSubdomain) {
     }
     caddy.updateCaddyfile(tunnelConfig);
 
-    ws.send(JSON.stringify({ 
-        type: 'TUNNEL_ASSIGNED', 
+    ws.send(JSON.stringify({
+        type: 'TUNNEL_ASSIGNED',
         publicPort: assignedPort,
         subdomain: finalSubdomain,
-        fullUrl: `${HTTPS_ENABLED ? 'https' : 'http'}://${finalSubdomain}.${BASE_DOMAIN}${HTTPS_ENABLED ? '' : ':' + CADDY_PORT}`
+        fullUrl: `${HTTPS_ENABLED ? 'https' : 'http'}://${finalSubdomain}.${BASE_DOMAIN}`
     }));
 
     console.log(`Client assigned port ${assignedPort} and subdomain ${finalSubdomain}.`);

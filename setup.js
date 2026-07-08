@@ -111,8 +111,12 @@ async function main() {
             try { sh(`setcap 'cap_net_bind_service=+ep' $(command -v caddy)`); ok('cap_net_bind_service granted'); }
             catch { warn('setcap failed (ok if already running as root)'); }
         }
-        try { sh('systemctl disable --now caddy 2>/dev/null || true'); ok('System caddy.service disabled (we run our own)'); }
-        catch { /* ignore */ }
+        try {
+            sh('echo "" > /etc/caddy/Caddyfile');
+            sh('systemctl enable caddy 2>/dev/null || true');
+            sh('systemctl restart caddy');
+            ok('systemd caddy.service enabled and started');
+        } catch (e) { warn(`caddy.service setup failed: ${e.message}`); }
     });
 
     await step('Install project dependencies', () => {
@@ -134,8 +138,7 @@ async function main() {
             `PORT_RANGE_START=${rangeStart}`,
             `PORT_RANGE_END=${rangeEnd}`,
             `BASE_DOMAIN=${domain}`,
-            `HTTPS_ENABLED=true`,
-            `CADDY_PORT=443`
+            `HTTPS_ENABLED=true`
         ].join('\n') + '\n';
 
         if (fs.existsSync(envPath) && fs.readFileSync(envPath, 'utf8').trim() === env.trim()) {
@@ -179,7 +182,7 @@ async function main() {
     const vpsIp = (() => { try { return sh('hostname -I').split(' ')[0]; } catch { return 'VPS_IP'; } })();
 
     console.log(`\n${C.bold}${C.green}  All done.${C.reset}\n${C.dim}  ${'─'.repeat(40)}${C.reset}`);
-    console.log(`  ${C.bold}Public entry${C.reset}      https://*.${domain}  (via Caddy :443)`);
+    console.log(`  ${C.bold}Public entry${C.reset}      https://*.${domain}  (via systemd Caddy :443)`);
     console.log(`  ${C.bold}Signaling${C.reset}          ws://${vpsIp}:8081  (clients connect here)`);
     console.log(`  ${C.bold}Logs${C.reset}              pm2 logs hrok`);
     console.log(`  ${C.bold}Status${C.reset}            pm2 status`);
