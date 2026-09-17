@@ -42,7 +42,20 @@ let reconnectTimer = null;
 let fatalError = null;
 let shuttingDown = false;
 let lastSeen = Date.now();
+// sessionId -> { sock, connected, pending, dead, sent }. sock is the
+// current dial generation; pending holds request bytes that arrived
+// before a dial stuck; dead means the session is over (no more dials).
 const activeConnections = new Map();
+// One fast dial retry: fragile local servers (xpra's Python web server has
+// request_queue_size=5) RST bursts of simultaneous dials — on Windows
+// backlog overflow is an instant RST, which Caddy then reports as a random
+// subset of instant 502s. 50ms later the accept queue has drained.
+// ponytail: 1 retry fixed; add attempts only with evidence.
+const DIAL_RETRIES = 1;
+const DIAL_RETRY_MS = 50;
+// Errors worth one more dial: the local server was momentarily unwilling.
+// Anything else (bad host, no route) fails fast so ops sees the config bug.
+const TRANSIENT_DIAL_ERRORS = new Set(['ECONNREFUSED', 'ECONNRESET', 'ECONNABORTED']);
 
 function safeSend(obj) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return false;
@@ -56,18 +69,63 @@ function safeSend(obj) {
 
 // Notify the server exactly once per session so it can release its
 // session entry; otherwise the server leaks sockets/sessions.
-function closeSession(sessionId, localSocket) {
-    if (!activeConnections.has(sessionId)) return;
+function endSession(sessionId) {
+    const st = activeConnections.get(sessionId);
+    if (!st || st.dead) return;
+    st.dead = true;
     activeConnections.delete(sessionId);
     safeSend({ type: 'CLOSE_CONNECTION', sessionId });
-    try { localSocket.destroy(); } catch (e) {}
+    try { if (st.sock) st.sock.destroy(); } catch (e) {}
 }
 
 function dropLocalSockets() {
-    for (const [, s] of activeConnections) {
-        try { s.destroy(); } catch (e) {}
+    for (const [, st] of activeConnections) {
+        st.dead = true;
+        try { if (st.sock) st.sock.destroy(); } catch (e) {}
     }
     activeConnections.clear();
+}
+
+function dialLocal(sessionId, st, attempt) {
+    if (st.dead) return;
+    st.connected = false;
+    const localSocket = net.connect(LOCAL_TARGET.port, LOCAL_TARGET.host);
+    st.sock = localSocket;
+
+    // 'connect' and the ws 'message' events come from different sockets,
+    // so they can interleave: connected/pending flip atomically inside
+    // this callback so request bytes never bypass the pending buffer.
+    localSocket.on('connect', () => {
+        if (st.pending.length) {
+            try { localSocket.write(Buffer.concat(st.pending)); } catch (e) {}
+        }
+        st.pending = [];
+        st.connected = true;
+    });
+
+    localSocket.on('data', (buffer) => {
+        if (safeSend({ type: 'DATA', sessionId, payload: buffer.toString('base64') })) st.sent++;
+    });
+
+    localSocket.on('error', (err) => {
+        localSocket.destroy();
+        console.error(`Local dial ${sessionId} -> ${LOCAL_TARGET.host}:${LOCAL_TARGET.port} failed: ${err.code || err.message}`);
+        if (st.dead || st.sent > 0 || attempt >= DIAL_RETRIES || !TRANSIENT_DIAL_ERRORS.has(err.code)) return;
+        // Hand the session to the retry: clear st.sock so this
+        // generation's 'close' below can't end the session.
+        st.sock = null;
+        setTimeout(() => dialLocal(sessionId, st, attempt + 1), DIAL_RETRY_MS);
+    });
+
+    // 'close' covers normal end, reset, and connect failure, so the
+    // server is always notified (previously 'end' missed abrupt closes
+    // and 'error' never notified the server at all). A failed generation
+    // has already been replaced in st.sock or the session is dead, so
+    // only the live generation's close ends the session.
+    localSocket.on('close', () => {
+        if (st.dead || st.sock !== localSocket) return;
+        endSession(sessionId);
+    });
 }
 
 function scheduleReconnect() {
@@ -98,47 +156,28 @@ function handleMessage(data) {
         // fails, the public side sees a refused connection, and the
         // NEXT hit redials — no manual intervention when the app
         // comes back up.
-        const localSocket = net.connect(LOCAL_TARGET.port, LOCAL_TARGET.host);
-
-        activeConnections.set(sessionId, localSocket);
-
-        localSocket.on('data', (buffer) => {
-            safeSend({
-                type: 'DATA',
-                sessionId,
-                payload: buffer.toString('base64')
-            });
-        });
-
-        // 'close' covers normal end, reset, and connect failure, so the
-        // server is always notified (previously 'end' missed abrupt closes
-        // and 'error' never notified the server at all).
-        localSocket.on('close', () => {
-            closeSession(sessionId, localSocket);
-        });
-
-        localSocket.on('error', () => {
-            // 'close' follows 'error' and does the cleanup; destroy here
-            // so 'close' fires promptly on connect refusal.
-            try { localSocket.destroy(); } catch (e) {}
-        });
+        const st = { sock: null, connected: false, pending: [], dead: false, sent: 0 };
+        activeConnections.set(sessionId, st);
+        dialLocal(sessionId, st, 0);
     } else if (msg.type === 'DATA') {
         const { sessionId, payload } = msg;
         if (typeof sessionId !== 'string' || typeof payload !== 'string') return;
-        const localSocket = activeConnections.get(sessionId);
-        if (localSocket && !localSocket.destroyed) {
-            try {
-                localSocket.write(Buffer.from(payload, 'base64'));
-            } catch (e) {}
+        const st = activeConnections.get(sessionId);
+        if (!st || st.dead) return;
+        const chunk = Buffer.from(payload, 'base64');
+        // Live connected socket: write directly (net buffers while
+        // connecting). Between a failed dial and its retry there is no
+        // socket yet — park the bytes so the request replays in full on
+        // the next dial.
+        if (st.connected && st.sock && !st.sock.destroyed && st.sock.writable) {
+            try { st.sock.write(chunk); } catch (e) {}
+        } else {
+            st.pending.push(chunk);
         }
     } else if (msg.type === 'CLOSE_CONNECTION') {
         const { sessionId } = msg;
         if (typeof sessionId !== 'string') return;
-        const localSocket = activeConnections.get(sessionId);
-        if (localSocket) {
-            activeConnections.delete(sessionId);
-            try { localSocket.destroy(); } catch (e) {}
-        }
+        endSession(sessionId);
     } else if (msg.type === 'ERROR') {
         // Server rejects the tunnel itself (bad subdomain, no ports) —
         // retrying the same request is pointless, so exit and let the

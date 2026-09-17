@@ -85,7 +85,12 @@ class CaddyManager {
         for (let i = 0; i < candidates.length; i++) {
             const cmd = candidates[i];
             const isLast = i === candidates.length - 1;
-            const result = spawnSync(cmd, { shell: true, stdio: 'pipe', encoding: 'utf8' });
+            // ponytail: 10s timeout — a hung systemctl/caddy (stalled dbus,
+            // dead admin endpoint) must freeze the signaling loop for at
+            // most seconds, never forever: every tunnel relays through
+            // this process. The snippet file was already written, so the
+            // route is safe (see project rule 6) — only the reload is lost.
+            const result = spawnSync(cmd, { shell: true, stdio: 'pipe', encoding: 'utf8', timeout: 10000 });
             if (result.status === 0) {
                 console.log('Caddy configuration reloaded successfully.');
                 return;

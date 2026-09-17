@@ -28,9 +28,10 @@ TCP sessions via `sessionId`.
 - **`client.js`** — dials `--server=` (default `ws://localhost:8081`),
   sends `REQUEST_TUNNEL`, bridges each `NEW_CONNECTION` to
   `--local=` (`PORT` or `HOST:PORT`, default `127.0.0.1:3000`). Tracks
-  sessions in `activeConnections` (sessionId → local socket). Reconnects
-  with backoff on drop; watchdog kills half-open links. Runs well as a
-  service (pm2/systemd on Linux, `--startup` on Windows — see
+  sessions in `activeConnections` (sessionId →
+  `{ sock, connected, pending, dead, sent }`). Reconnects with backoff on
+  drop; watchdog kills half-open links. Runs well as a service
+  (pm2/systemd on Linux, `--startup` on Windows — see
   Windows service & distribution).
 - **`CaddyManager.js`** — owns ONLY the snippet file next to the
   Caddyfile (`hrok-tunnels.caddy`), regenerating it from `clientTunnels`
@@ -40,9 +41,11 @@ TCP sessions via `sessionId`.
   with a Caddy that's already serving something. Then reloads: explicit
   `CADDY_RELOAD_COMMAND` → `systemctl reload caddy` → `caddy reload`.
   Missing binaries on a dev machine are silent; a failed reload is a
-  logged error, never an exception. **The snippet write is the source
-  of truth.** Path overridable via `CADDYFILE_PATH` env (default
-  `/etc/caddy/Caddyfile`).
+  logged error, never an exception. Each candidate is spawned with a 10s
+  timeout — a hung `systemctl`/`caddy` must freeze the signaling loop for
+  seconds, never forever, since every tunnel's traffic flows through this
+  process. **The snippet write is the source of truth.** Path overridable
+  via `CADDYFILE_PATH` env (default `/etc/caddy/Caddyfile`).
 - **`SETUP.md`** — one-time VPS provisioning (Node 20, Caddy via systemd,
   pm2, UFW, `.env`, DNS). Manual steps, not a script. Update it in the
   same commit if you change anything an operator types during
@@ -89,11 +92,24 @@ so raw TCP bytes must be encoded; ~33% overhead, accepted deliberately).
    a rejected subdomain/empty pool is pointless, so the client exits 1
    and lets the process manager (pm2/systemd) surface it. `SIGINT/SIGTERM`
    shut down cleanly (destroy local sockets, close ws, exit).
- - **Local app down is not fatal.** Each `NEW_CONNECTION` dials
-   `--local` fresh, so a down app just refuses that session (public side
-   sees a fast close, ~10ms) and the *next* hit redials. Start the app
-   later and the tunnel works with zero intervention. This is what makes
-  the client safe to run as a service against port 4222 or anything else.
+  - **Local app down is not fatal.** Each `NEW_CONNECTION` dials
+    `--local` fresh, so a down app just refuses that session (public side
+    sees a fast close, ~10ms) and the *next* hit redials. Start the app
+    later and the tunnel works with zero intervention. This is what makes
+   the client safe to run as a service against port 4222 or anything else.
+  - **Burst dial RSTs get one retry.** Fragile local servers (xpra's
+    Python web server: `request_queue_size=5`) reset bursts of
+    simultaneous dials — on Windows backlog overflow is an instant RST,
+    which Caddy reports as a random subset of instant 502s on asset-heavy
+    pages. The client retries the dial once after 50ms
+    (`DIAL_RETRIES`/`DIAL_RETRY_MS`) for transient OS errors
+    (`ECONNREFUSED/ECONNRESET/ECONNABORTED`), buffering request bytes in
+    `st.pending` until a dial sticks (flushed atomically with the
+    `connected` flag so ws/socket event interleaving can't reorder the
+    request). No response bytes relayed yet (`sent === 0`) is a retry
+    precondition — a mid-stream reset is the local server's own failure
+    and is surfaced as-is. Dial failures are logged with the OS error
+    code; the retry is absorbed silently.
 
  ## Windows service & distribution (`--startup` / `--remove`)
 
@@ -151,8 +167,10 @@ so raw TCP bytes must be encoded; ~33% overhead, accepted deliberately).
   bool). Never raw `ws.send` on a socket that may be dead.
 - **Teardown uses `'close'`, not `'end'`.** Resets and half-closes skip
   `'end'`; `'close'` always fires, so both sides free the session entry
-  and notify the peer exactly once (`closeSession` guard on the client,
-  `sessions.delete` guard on the server).
+  and notify the peer exactly once (`endSession` dead-flag guard on the
+  client, `sessions.delete` guard on the server). On the client, only the
+  live dial generation's `close` ends a session: a retried dial clears
+  `st.sock` first so the failed generation's `close` can't end it.
 - **Garbage frames are ignored.** `JSON.parse` is wrapped; non-objects
   and unknown shapes return early. Neither side crashes on `'not json'`.
 
