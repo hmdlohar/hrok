@@ -12,19 +12,25 @@ fixes the root cause, delete before you add, reuse before you invent.
 
 ## Stack & layout
 
-- Node 20+, only deps: `ws`, `dotenv`. Keep it that way.
+- Node 20+, deps: `ws`, `dotenv` (runtime) + `node-windows` (WinSW SCM
+  binary only) + `@yao-pkg/pkg` (devDep, exe packaging). Keep it that way.
 - `server.js` — signaling (`ws` on `SIGNALING_PORT`, default 8081) + one
   `net.createServer` per tunnel on ports `9000-9100`. Owns `clientTunnels`
   (port → tunnel) and `subdomainMap` (subdomain → port).
 - `client.js` — dials `--server=` (default `ws://localhost:8081`), bridges
-  sessions to `--local=` port. CLI: `--server= --local= --subdomain=`.
+  sessions to `--local=` port. CLI: `--server= --local= --subdomain=`,
+  plus `--startup` / `--remove` (Windows service verbs; Linux → exit 1).
 - `CaddyManager.js` — owns ONLY the snippet `hrok-tunnels.caddy` next to
   the Caddyfile, then reload. Adds one `import` line to the main file on
   first write; existing site blocks are never touched. Never hand-edit
   the snippet while the server runs; always go through `CaddyManager`.
 - `SETUP.md` — one-time VPS provisioning (Node 20, Caddy via systemd,
-  pm2, UFW, `.env`). Manual copy-paste steps, not a script — read it
-  before touching deploy-related code.
+  pm2, UFW, `.env`) + end-user Windows client usage (§7). Manual
+  copy-paste steps, not a script — read it before touching deploy-related
+  code.
+- `dist/` — pkg-built exes (`hrok.exe` for Windows). Gitignored; built by
+  `npm run build:win` / `build:linux` or the tag-triggered GitHub Action.
+  Winsw.exe is embedded as a pkg asset and extracted at `--startup` time.
 - `.env` — `SIGNALING_PORT, PORT_RANGE_START/END, BASE_DOMAIN,
   HTTPS_ENABLED, CADDYFILE_PATH (dev override), CADDY_RELOAD_COMMAND (dev override)`.
 

@@ -1,17 +1,31 @@
 {
-  "name": "tunnel2",
+  "name": "hrok",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Grumpy minimalist tunnel daemon: expose a local TCP port on a public subdomain.",
+  "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build:win": "pkg . --target node22-win-x64 --output dist/hrok.exe",
+    "build:linux": "pkg . --target node22-linux-x64 --output dist/hrok"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
     "dotenv": "^17.4.2",
+    "node-windows": "^1.0.0-beta.8",
     "ws": "^8.20.1"
+  },
+  "devDependencies": {
+    "@yao-pkg/pkg": "^6.22.0"
+  },
+  "bin": {
+    "hrok": "client.js"
+  },
+  "pkg": {
+    "assets": [
+      "node_modules/node-windows/bin/winsw/*"
+    ]
   }
 }

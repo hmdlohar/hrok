@@ -1,0 +1,22 @@
+# Builds the Windows client exe and attaches it to a GitHub release.
+# Trigger: push a version tag — git tag v1.0.0 && git push origin v1.0.0
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  windows-exe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm run build:win
+      - name: Create release with exe
+        run: gh release create "$GITHUB_REF_NAME" dist/hrok.exe --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}

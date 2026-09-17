@@ -30,7 +30,8 @@ TCP sessions via `sessionId`.
   `--local=` (`PORT` or `HOST:PORT`, default `127.0.0.1:3000`). Tracks
   sessions in `activeConnections` (sessionId → local socket). Reconnects
   with backoff on drop; watchdog kills half-open links. Runs well as a
-  service (pm2/systemd) — see Heartbeat & reconnect.
+  service (pm2/systemd on Linux, `--startup` on Windows — see
+  Windows service & distribution).
 - **`CaddyManager.js`** — owns ONLY the snippet file next to the
   Caddyfile (`hrok-tunnels.caddy`), regenerating it from `clientTunnels`
   on every assign/disconnect (`.bak` kept). On first write it appends a
@@ -64,7 +65,8 @@ so raw TCP bytes must be encoded; ~33% overhead, accepted deliberately).
  CLI: `node client.js --server=ws://IP:8081 --local=3000 --subdomain=myapp`.
  `requestedSubdomain` empty → server assigns a random 6-char one.
  `--local` accepts `PORT` or `HOST:PORT` (default `127.0.0.1:3000`,
- invalid → that default).
+ invalid → that default). Extra verbs: `--startup` / `--remove`
+ (Windows only, see below).
 
  ## Heartbeat & reconnect (service readiness)
 
@@ -92,6 +94,52 @@ so raw TCP bytes must be encoded; ~33% overhead, accepted deliberately).
    sees a fast close, ~10ms) and the *next* hit redials. Start the app
    later and the tunnel works with zero intervention. This is what makes
   the client safe to run as a service against port 4222 or anything else.
+
+ ## Windows service & distribution (`--startup` / `--remove`)
+
+ End users don't install Node. The client is shipped as a self-contained
+ exe (`dist/hrok.exe`) and registers itself as a Windows service:
+
+ - **Packaging:** `@yao-pkg/pkg` (maintained fork of vercel/pkg) bundles
+   client.js + Node 22 into one exe. `npm run build:win` (also
+   `build:linux` for a raw binary). `package.json` `pkg.assets` embeds
+   node-windows' `winsw.exe` + `.config` verbatim inside the exe.
+   pkg's babel warnings about the binary are cosmetic noise.
+ - **`hrok --startup --server=... --local=... --subdomain=...`**
+   installs and starts a service named `hrok-<subdomain>` (or plain
+   `hrok` without one). The service command line is THIS exe plus the
+   tunnel flags — so the reconnect/heartbeat logic IS the service logic.
+ - **WinSW, not node-windows' Service class.** A plain exe can't be a
+   service (SCM protocol), so the SCM wrapper is unavoidable. We use the
+   WinSW binary vendored in node-windows' `bin/` but generate the XML
+   ourselves and skip node-windows' `Service` class entirely: that class
+   wraps your script in its own wrapper.js and `child_process.fork`s it —
+   which doesn't survive pkg packaging (virtual `/snapshot/` paths).
+   `require.resolve('node-windows/bin/winsw/winsw.exe')` +
+   `fs.readFileSync` works under both node and pkg (readFileSync reads
+   from pkg's virtual fs; copyFileSync does not). Files land in
+   `<exe dir>\daemon\`: `<id>.exe` (WinSW copy), `<id>.xml` (config),
+   `<id>.out.log` / `.err.log` (rotating service logs).
+ - **UAC:** non-admin run relaunches itself once via PowerShell
+   `Start-Process -Verb RunAs -Wait` (single prompt; no node-windows
+   elevate dependency). The elevated copy does the work, the parent
+   verifies with `sc query` and reports.
+ - **Boot + crash recovery:** `sc config start= auto` for boot survival;
+   `sc failure ... restart/30000` ×3 for crash recovery. The bundled
+   WinSW 1.x predates `<onfailure>`, so recovery lives in the SCM.
+   ponytail caveat: a permanently-fatal config (e.g. rejected subdomain)
+   restart-loops every 30s by design — the `.err.log` shows why; fix
+   flags with `--startup` again or `--remove`.
+ - **Idempotent:** `--startup` over an existing service stops, uninstalls,
+   reinstalls with the new flags. `--remove` stops, uninstalls, deletes
+   the daemon dir files (dir kept if another `hrok-*` service shares it).
+ - **Subdomain validated before install** (same regex as the server) — a
+   bad one would just restart-loop forever as a service.
+ - **Releases:** GitHub Action (`.github/workflows/release.yml`) builds
+   the exe on `v*` tags and attaches it to a GitHub release
+   (`git tag v1.0.0 && git push origin v1.0.0`).
+ - **Linux:** `--startup`/`--remove` exit 1 with a pointer to
+   systemd/pm2. Deliberate — real Linux service support is a later task.
 
  ## Concurrency model (read this before touching it)
 
@@ -179,6 +227,8 @@ node --check server.js client.js CaddyManager.js
 # garbage frame ('not json') crashes nothing ->
 # local down (fast close) -> local up (works, no restart) ->
 # server kill -> client reconnects + reclaims subdomain
+# if client.js touched: npm run build:linux and rerun the above
+# through dist/hrok (the exe), plus ./dist/hrok --startup -> exit 1
 ```
 
 If your change touches the protocol, ports, Caddy interaction, lifecycle,

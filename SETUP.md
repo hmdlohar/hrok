@@ -141,6 +141,40 @@ node client.js --server=ws://<VPS_IP>:8081 --local=3000 --subdomain=myapp
 # visit https://myapp.<your-domain>
 ```
 
+## 7. Windows clients (end users, no Node needed)
+
+End users download `hrok.exe` from the repo's GitHub Releases (built
+automatically from `v*` tags by the release workflow — to cut one:
+`git tag v1.0.0 && git push origin v1.0.0`). No Node, no npm, nothing
+else. The exe is self-contained.
+
+Run a tunnel from any prompt (same flags as the node client):
+
+```powershell
+.\hrok.exe --server=ws://<VPS_IP>:8081 --local=3000 --subdomain=myapp
+```
+
+Start with the machine / survive crashes as a Windows service:
+
+```powershell
+.\hrok.exe --startup --server=ws://<VPS_IP>:8081 --local=3000 --subdomain=myapp
+# one UAC prompt; service 'hrok-myapp' installs and starts.
+# logs: <exe dir>\daemon\hrok-myapp.out.log / .err.log
+
+.\hrok.exe --remove --subdomain=myapp   # stop + uninstall
+```
+
+Notes for support:
+
+- Service name is `hrok-<subdomain>` (`hrok` if no subdomain). Re-running
+  `--startup` with different flags reinstalls with the new flags.
+- If the service flaps, the cause is in `daemon\hrok-<sub>.err.log` —
+  usually a rejected subdomain or an unreachable `--server`.
+- Keep the exe where it was first run: the service points at that path
+  (`sc qc hrok-myapp` shows it). Moving the exe requires `--startup` again.
+- Linux end users: run `client.js` under pm2/systemd — `--startup` is
+  Windows-only and exits 1 elsewhere.
+
 ## Maintenance
 
 - Update: `cd /opt/hrok && git pull && npm install && pm2 restart hrok`.
