@@ -1,4 +1,4 @@
-const { spawnSync } = require('child_process');
+const { exec } = require('child_process');
 const fs = require('fs');
 
 const DEFAULT_CADDYFILE_PATH = '/etc/caddy/Caddyfile';
@@ -79,32 +79,49 @@ class CaddyManager {
         }
     }
 
+    // Async + serialized: a slow systemctl/caddy must never block the
+    // event loop every tunnel relays through. A change arriving mid-reload
+    // sets reloadPending and gets ONE follow-up reload, which picks up the
+    // latest snippet (the file write above is synchronous).
     reload() {
-        // Prefer explicit command; fall back to systemctl only when it exists.
-        const candidates = [this.reloadCommand, 'systemctl reload caddy', 'caddy reload'].filter(Boolean);
-        for (let i = 0; i < candidates.length; i++) {
+        if (this.reloading) { this.reloadPending = true; return; }
+        this.reloading = true;
+        // Explicit command first; systemctl is the production path (caddy
+        // under systemd); `caddy reload` hits the admin API of the same
+        // running caddy when systemctl isn't usable (non-root, no systemd).
+        const candidates = [
+            this.reloadCommand,
+            'systemctl reload caddy',
+            `caddy reload --config "${this.caddyfilePath}"`
+        ].filter(Boolean);
+        const done = () => {
+            this.reloading = false;
+            if (this.reloadPending) { this.reloadPending = false; this.reload(); }
+        };
+        let failure = null;
+        const attempt = (i) => {
             const cmd = candidates[i];
             const isLast = i === candidates.length - 1;
-            // ponytail: 10s timeout — a hung systemctl/caddy (stalled dbus,
-            // dead admin endpoint) must freeze the signaling loop for at
-            // most seconds, never forever: every tunnel relays through
-            // this process. The snippet file was already written, so the
-            // route is safe (see project rule 6) — only the reload is lost.
-            const result = spawnSync(cmd, { shell: true, stdio: 'pipe', encoding: 'utf8', timeout: 10000 });
-            if (result.status === 0) {
-                console.log('Caddy configuration reloaded successfully.');
-                return;
-            }
-            // Binary missing (dev machine without caddy/systemd): not an
-            // error worth spamming; remaining candidates will be tried, and
-            // if none exist we stay silent since the file was still written.
-            if (result.error && result.error.code === 'ENOENT') {
-                if (isLast) return;
-                continue;
-            }
-            if (!isLast) continue;
-            console.error(`Caddy reload failed (${cmd}):`, (result.stderr || result.error || '').toString().trim());
-        }
+            // ponytail: 10s timeout per candidate — a hung systemctl/caddy
+            // (stalled dbus, dead admin endpoint) delays the route, never
+            // loses it: the snippet is already written (project rule 6).
+            exec(cmd, { timeout: 10000 }, (err, stdout, stderr) => {
+                if (!err) {
+                    console.log('Caddy configuration reloaded successfully.');
+                    return done();
+                }
+                // Shell exit 127 = binary missing (dev machine without
+                // caddy/systemd): not worth logging. Remember the first
+                // real failure so it's what ops sees if nothing works.
+                if (err.code !== 127 && !failure) {
+                    failure = `Caddy reload failed (${cmd}): ${(stderr || err.message).toString().trim()}`;
+                }
+                if (!isLast) return attempt(i + 1);
+                if (failure) console.error(failure);
+                done();
+            });
+        };
+        attempt(0);
     }
 }
 

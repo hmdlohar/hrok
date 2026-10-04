@@ -5,7 +5,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node e2e.js",
     "build:win": "pkg . --target node22-win-x64 --output dist/hrok.exe",
     "build:linux": "pkg . --target node22-linux-x64 --output dist/hrok"
   },

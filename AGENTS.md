@@ -24,6 +24,8 @@ fixes the root cause, delete before you add, reuse before you invent.
   the Caddyfile, then reload. Adds one `import` line to the main file on
   first write; existing site blocks are never touched. Never hand-edit
   the snippet while the server runs; always go through `CaddyManager`.
+- `e2e.js` — `npm test`. Spawns real server + client against a temp
+  Caddyfile (no caddy needed) and asserts the rule-5 flow.
 - `SETUP.md` — one-time VPS provisioning (Node 20, Caddy via systemd,
   pm2, UFW, `.env`) + end-user Windows client usage (§7). Manual
   copy-paste steps, not a script — read it before touching deploy-related
@@ -61,9 +63,10 @@ fixes the root cause, delete before you add, reuse before you invent.
    code, in that order.
 4. **Fewest files, shortest diff.** Don't scaffold for later. Mark deliberate
    shortcuts with `ponytail:` + ceiling + upgrade path.
-5. **Verify before you claim done:** `node --check` on touched files plus an
-   end-to-end run (tunnel assign → TCP echo → invalid-subdomain reject →
-   disconnect cleanup). Garbage frames (`'not json'`) must never crash
+5. **Verify before you claim done:** `node --check` on touched files plus
+   `npm test` (tunnel assign → TCP echo → invalid-subdomain reject →
+   disconnect cleanup, and more), plus a manual run for what it doesn't
+   cover (reconnect, Windows service). Garbage frames (`'not json'`) must never crash
    either side.
 6. **Losing Caddy reload must never lose the route.** The file write is the
    source of truth; a failed `systemctl/caddy reload` is a logged error,

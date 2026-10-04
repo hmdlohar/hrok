@@ -115,7 +115,9 @@ sudo ufw allow 443/tcp
 sudo ufw allow 8081/tcp  # signaling; clients dial this
 ```
 
-`9000-9100` stays localhost-only (Caddy dials it). Never expose it.
+`9000-9100` stays localhost-only (Caddy dials it). The server binds those
+ports to `127.0.0.1`, so they're unreachable from outside even without
+UFW — don't open them anyway.
 
 ## 5. Run the server under pm2
 
@@ -172,12 +174,27 @@ Notes for support:
   usually a rejected subdomain or an unreachable `--server`.
 - Keep the exe where it was first run: the service points at that path
   (`sc qc hrok-myapp` shows it). Moving the exe requires `--startup` again.
+- **Upgrading the exe** (no reinstall — the service runs whatever exe
+  is at its path; flags, auto-start and recovery settings are kept).
+  Admin prompt:
+  ```powershell
+  sc qc hrok-myapp     # BINARY_PATH_NAME = where the exe lives
+  sc stop hrok-myapp   # a running exe is locked
+  copy /Y <new>\hrok.exe <that path>\hrok.exe
+  sc start hrok-myapp
+  ```
+  The wire protocol is stable, so old clients keep working against a
+  newer server — upgrading clients is optional unless release notes say
+  otherwise.
 - Linux end users: run `client.js` under pm2/systemd — `--startup` is
   Windows-only and exits 1 elsewhere.
 
 ## Maintenance
 
 - Update: `cd /opt/hrok && git pull && npm install && pm2 restart hrok`.
+  Restart drops all tunnels for ~1-2s; clients reconnect on their own.
+  Sanity check: `ss -ltnp | grep ':90'` shows tunnel ports on
+  `127.0.0.1` only.
 - Change domain/port range: edit `.env`, then `pm2 restart hrok`.
 - Logs: `pm2 logs hrok`. Status: `pm2 status`.
 - Caddy routes live in `/etc/caddy/hrok-tunnels.caddy` (auto-imported

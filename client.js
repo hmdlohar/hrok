@@ -5,17 +5,24 @@ const { spawnSync } = require('child_process');
 const WebSocket = require('ws');
 
 const args = process.argv.slice(2);
-const serverArg = args.find(a => a.startsWith('--server='));
-const localArg = args.find(a => a.startsWith('--local='));
-const subdomainArg = args.find(a => a.startsWith('--subdomain='));
+// Value after the FIRST '=' so values containing '=' (query strings) survive.
+function flag(name) {
+    const a = args.find(x => x.startsWith(`--${name}=`));
+    return a ? a.slice(name.length + 3) : null;
+}
 // Service verbs: install (--startup) / remove (--remove) this tunnel as a
 // Windows service. Anything else just runs the tunnel below.
 const STARTUP = args.includes('--startup');
 const REMOVE = args.includes('--remove');
 
 // Default must match server's SIGNALING_PORT (8081), not Caddy's 8080.
-const SERVER_URL = serverArg ? serverArg.split('=')[1] : 'ws://localhost:8081';
-const REQUESTED_SUBDOMAIN = subdomainArg ? subdomainArg.split('=')[1] : null;
+const SERVER_URL = flag('server') || 'ws://localhost:8081';
+const REQUESTED_SUBDOMAIN = flag('subdomain');
+// No --subdomain: remember the random one the server handed out and ask
+// for it again on reconnect, so the public URL (and its TLS cert) stays
+// stable across network blips. With --subdomain we always re-ask for the
+// user's name, even if a collision once gave us a suffixed one.
+let claimedSubdomain = REQUESTED_SUBDOMAIN;
 
 // Accepts "4222" or "127.0.0.1:4222". Invalid -> 127.0.0.1:3000.
 function parseLocalTarget(raw) {
@@ -26,7 +33,7 @@ function parseLocalTarget(raw) {
     }
     return { host: m[1] || '127.0.0.1', port };
 }
-const LOCAL_TARGET = parseLocalTarget(localArg ? localArg.split('=')[1] : null);
+const LOCAL_TARGET = parseLocalTarget(flag('local'));
 
 // ponytail: fixed backoff 1s doubling to 30s cap + <1s jitter.
 // Env-tunable if ops ever needs it.
@@ -56,11 +63,13 @@ const DIAL_RETRY_MS = 50;
 // Errors worth one more dial: the local server was momentarily unwilling.
 // Anything else (bad host, no route) fails fast so ops sees the config bug.
 const TRANSIENT_DIAL_ERRORS = new Set(['ECONNREFUSED', 'ECONNRESET', 'ECONNABORTED']);
+// Above this many queued ws bytes, pause the local socket feeding it.
+const WS_HIGH_WATER = 1024 * 1024;
 
-function safeSend(obj) {
+function safeSend(obj, cb) {
     if (!ws || ws.readyState !== WebSocket.OPEN) return false;
     try {
-        ws.send(JSON.stringify(obj));
+        ws.send(JSON.stringify(obj), cb);
         return true;
     } catch (e) {
         return false;
@@ -103,8 +112,12 @@ function dialLocal(sessionId, st, attempt) {
         st.connected = true;
     });
 
+    // Backpressure: pause while the ws is backed up; resume once the
+    // frame we just queued has been flushed.
     localSocket.on('data', (buffer) => {
-        if (safeSend({ type: 'DATA', sessionId, payload: buffer.toString('base64') })) st.sent++;
+        if (!safeSend({ type: 'DATA', sessionId, payload: buffer.toString('base64') }, () => localSocket.resume())) return;
+        st.sent++;
+        if (ws.bufferedAmount > WS_HIGH_WATER) localSocket.pause();
     });
 
     localSocket.on('error', (err) => {
@@ -145,6 +158,7 @@ function handleMessage(data) {
     if (!msg || typeof msg !== 'object') return;
 
     if (msg.type === 'TUNNEL_ASSIGNED') {
+        if (!REQUESTED_SUBDOMAIN && typeof msg.subdomain === 'string') claimedSubdomain = msg.subdomain;
         console.log(`\x1b[32mTunnel established!\x1b[0m`);
         console.log(`Public URL: ${msg.fullUrl}`);
         console.log(`Local target: ${LOCAL_TARGET.host}:${LOCAL_TARGET.port}`);
@@ -165,6 +179,8 @@ function handleMessage(data) {
         const st = activeConnections.get(sessionId);
         if (!st || st.dead) return;
         const chunk = Buffer.from(payload, 'base64');
+        // ponytail: no backpressure toward a slow local app — writes buffer
+        // in memory. Needs PAUSE/RESUME frames if bulk uploads ever matter.
         // Live connected socket: write directly (net buffers while
         // connecting). Between a failed dial and its retry there is no
         // socket yet — park the bytes so the request replays in full on
@@ -215,7 +231,7 @@ function connect() {
         console.log('Connected to signaling server');
         safeSend({
             type: 'REQUEST_TUNNEL',
-            requestedSubdomain: REQUESTED_SUBDOMAIN
+            requestedSubdomain: claimedSubdomain
         });
     });
 
