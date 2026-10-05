@@ -33,7 +33,11 @@ fixes the root cause, delete before you add, reuse before you invent.
   code.
 - npm: `npm i -g @hmdlohar/hrok` ships ONLY `client.js` (`package.json` `files`).
   Same CLI, service runs `node <client.js>` instead of the exe.
-- `dist/` — pkg-built exes (`hrok.exe` for Windows). Gitignored; built by
+- `install.sh` / `install.ps1` — curl|sh and irm|iex one-liners that
+  fetch the latest release binary into `~/.local/bin` /
+  `%LOCALAPPDATA%\hrok` (no sudo/admin). `README.md` — user-facing
+  front page (also the npm page).
+- `dist/` — pkg-built exes (`hrok.exe` Windows, `hrok` Linux x64). Gitignored; built by
   `npm run build:win` / `build:linux` or the tag-triggered GitHub Action.
   Winsw.exe is embedded as a pkg asset and extracted at `--startup` time.
 - `.env` — `SIGNALING_PORT, PORT_RANGE_START/END, BASE_DOMAIN,

@@ -208,7 +208,8 @@ so raw TCP bytes must be encoded; ~33% overhead, accepted deliberately).
  - **Subdomain validated before install** (same regex as the server) — a
    bad one would just restart-loop forever as a service.
  - **Releases:** GitHub Action (`.github/workflows/release.yml`) builds
-   the exe on `v*` tags and attaches it to a GitHub release
+   `hrok.exe` + the Linux x64 binary `hrok` on `v*` tags and attaches
+   both to a GitHub release
    (`git tag v1.0.0 && git push origin v1.0.0`).
 
  ## Concurrency model (read this before touching it)

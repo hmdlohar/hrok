@@ -143,12 +143,31 @@ node client.js --server=ws://<VPS_IP>:8081 --local=3000 --subdomain=myapp
 # visit https://myapp.<your-domain>
 ```
 
-## 7. Windows clients (end users, no Node needed)
+## 7. Binary clients (end users, no Node needed)
 
-End users download `hrok.exe` from the repo's GitHub Releases (built
-automatically from `v*` tags by the release workflow — to cut one:
-`git tag v1.0.0 && git push origin v1.0.0`). No Node, no npm, nothing
-else. The exe is self-contained.
+One-liners (download the latest release, no admin/sudo; re-run to
+upgrade):
+
+```bash
+# Linux x64 -> ~/.local/bin/hrok
+curl -fsSL https://raw.githubusercontent.com/hmdlohar/hrok/main/install.sh | sh
+```
+```powershell
+# Windows x64 -> %LOCALAPPDATA%\hrok\hrok.exe, added to user PATH
+irm https://raw.githubusercontent.com/hmdlohar/hrok/main/install.ps1 | iex
+```
+
+Or download `hrok.exe` / `hrok` (Linux x64, `chmod +x`) from the repo's
+GitHub Releases by hand. Releases are built automatically from `v*` tags
+by the release workflow — to cut one:
+`git tag v1.0.0 && git push origin v1.0.0`. The installers fetch
+`releases/latest/download/<file>`, so they need a published (non-draft)
+release with both assets. Linux binary service verbs: same as §8
+(`--startup [--user]`). The rest of this section is Windows.
+
+Upgrading with `install.ps1` while the service runs is fine: it renames
+the locked exe to `hrok.exe.old` and drops the new one in place; the
+service picks it up on its next restart (`sc stop` + `sc start`).
 
 Run a tunnel from any prompt (same flags as the node client):
 

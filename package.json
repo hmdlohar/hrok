@@ -1,6 +1,6 @@
 {
   "name": "@hmdlohar/hrok",
-  "version": "1.0.0",
+  "version": "1.0.3",
   "description": "Grumpy minimalist tunnel daemon: expose a local TCP port on a public subdomain.",
   "scripts": {
     "start": "node server.js",
