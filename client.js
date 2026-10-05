@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 const net = require('net');
 const path = require('path');
 const fs = require('fs');
@@ -14,6 +15,8 @@ function flag(name) {
 // Windows service. Anything else just runs the tunnel below.
 const STARTUP = args.includes('--startup');
 const REMOVE = args.includes('--remove');
+// --user: per-user service (Linux/macOS), no sudo. See OS service below.
+const USER_MODE = args.includes('--user');
 
 // Default must match server's SIGNALING_PORT (8081), not Caddy's 8080.
 const SERVER_URL = flag('server') || 'ws://localhost:8081';
@@ -275,30 +278,38 @@ function shutdown(signal) {
 process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-// ---------------- Windows service (--startup / --remove) ----------------
-// The same exe is installer AND service runtime. A plain exe can't be a
-// Windows service (services must speak the SCM protocol), so --startup wraps
-// THIS exe with WinSW, copied out of node-windows' bin (only the binary is
-// used — node-windows' Service class insists on its own wrapper script, which
-// doesn't survive packaging). The service command line is simply this exe
-// plus the tunnel flags, so all the reconnect/heartbeat logic above is the
-// service's logic too.
-const SERVICE_ARGS = args.filter(a => a !== '--startup' && a !== '--remove');
+// ---------------- OS service (--startup / --remove) ----------------
+// The service command line is hrok itself plus the tunnel flags, so all the
+// reconnect/heartbeat logic above is the service's logic too. One backend
+// per OS, all native: Windows SCM via WinSW, Linux systemd, macOS launchd.
+const SERVICE_ARGS = args.filter(a => !['--startup', '--remove', '--user'].includes(a));
 const SUBDOMAIN_RE = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
 const SERVICE_ID = REQUESTED_SUBDOMAIN && SUBDOMAIN_RE.test(REQUESTED_SUBDOMAIN)
     ? `hrok-${REQUESTED_SUBDOMAIN}` : 'hrok';
+// How to run hrok again: the pkg exe is self-contained; under npm it's
+// node + this script (realpath: the npm bin is a symlink/shim).
+const SELF = process.pkg ? [process.execPath] : [process.execPath, fs.realpathSync(process.argv[1])];
+const SERVICE_CMD = [...SELF, ...SERVICE_ARGS];
+const xmlEsc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+// --- Windows: WinSW wraps the command (a plain exe/node can't speak SCM).
+// Only the binary from node-windows' bin is used — its Service class insists
+// on its own wrapper script, which doesn't survive packaging.
+const WIN_DAEMON_DIR = process.pkg
+    ? path.join(path.dirname(process.execPath), 'daemon')
+    : path.join(process.env.ProgramData || 'C:\\ProgramData', 'hrok');
 
 function isAdmin() {
     return spawnSync('net', ['session'], { stdio: 'ignore' }).status === 0;
 }
 
-// One UAC prompt total: relaunch this exe with the same args elevated and
+// One UAC prompt total: relaunch hrok with the same args elevated and
 // wait. The elevated copy sees itself as admin and does the real work.
 // ponytail: no escaping for embedded " in args; no flag value accepts one.
 function relaunchElevated() {
     const esc = s => s.replace(/'/g, "''");
-    const argList = process.argv.slice(2).map(a => `'\"${esc(a)}\"'`).join(',');
-    const ps = `Start-Process -FilePath '${esc(process.execPath)}' -Verb RunAs -Wait -ArgumentList ${argList}`;
+    const argList = [...SELF.slice(1), ...args].map(a => `'\"${esc(a)}\"'`).join(',');
+    const ps = `Start-Process -FilePath '${esc(SELF[0])}' -Verb RunAs -Wait -ArgumentList ${argList}`;
     return spawnSync('powershell.exe', ['-NoProfile', '-Command', ps], { stdio: 'inherit' }).status;
 }
 
@@ -310,35 +321,33 @@ function serviceRunning() {
     return /RUNNING/.test(spawnSync('sc', ['query', SERVICE_ID], { encoding: 'utf8' }).stdout || '');
 }
 
-function winsw(daemonDir, subcommand) {
-    return spawnSync(path.join(daemonDir, `${SERVICE_ID}.exe`), [subcommand], { stdio: 'inherit' }).status;
+function winsw(subcommand) {
+    return spawnSync(path.join(WIN_DAEMON_DIR, `${SERVICE_ID}.exe`), [subcommand], { stdio: 'inherit' }).status;
 }
 
 // Flag values reach an XML file — escape like the Caddy snippet (rule 2).
-// One <argument> per flag is safe because flag values contain no spaces.
 function serviceXml() {
-    const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     return [
         '<service>',
         `  <id>${SERVICE_ID}</id>`,
         `  <name>${SERVICE_ID}</name>`,
-        `  <description>${esc(`hrok tunnel: ${SERVER_URL} -> ${LOCAL_TARGET.host}:${LOCAL_TARGET.port}`)}</description>`,
-        `  <executable>${esc(process.execPath)}</executable>`,
-        ...SERVICE_ARGS.map(a => `  <argument>${esc(a)}</argument>`),
+        `  <description>${xmlEsc(`hrok tunnel: ${SERVER_URL} -> ${LOCAL_TARGET.host}:${LOCAL_TARGET.port}`)}</description>`,
+        `  <executable>${xmlEsc(SERVICE_CMD[0])}</executable>`,
+        ...SERVICE_CMD.slice(1).map(a => `  <argument>${xmlEsc(a)}</argument>`),
         '  <logmode>rotate</logmode>',
         '</service>'
     ].join('\r\n') + '\r\n';
 }
 
-function manageService() {
-    const daemonDir = path.join(path.dirname(process.execPath), 'daemon');
+function manageWindows() {
+    const daemonDir = WIN_DAEMON_DIR;
 
     if (REMOVE) {
         if (!serviceInstalled()) { console.log(`Service '${SERVICE_ID}' is not installed.`); process.exit(0); }
         console.log(`Removing service '${SERVICE_ID}'...`);
         if (fs.existsSync(daemonDir)) {
-            winsw(daemonDir, 'stop');        // ok to fail if already stopped
-            winsw(daemonDir, 'uninstall');
+            winsw('stop');        // ok to fail if already stopped
+            winsw('uninstall');
             for (const f of fs.readdirSync(daemonDir)) {
                 if (f.startsWith(`${SERVICE_ID}.`)) fs.rmSync(path.join(daemonDir, f), { force: true });
             }
@@ -356,8 +365,8 @@ function manageService() {
     if (serviceInstalled()) {
         console.log(`Service '${SERVICE_ID}' exists — updating...`);
         if (fs.existsSync(daemonDir)) {
-            winsw(daemonDir, 'stop');
-            winsw(daemonDir, 'uninstall');
+            winsw('stop');
+            winsw('uninstall');
         }
     }
     console.log(`Installing service '${SERVICE_ID}': hrok ${SERVICE_ARGS.join(' ')}`);
@@ -369,7 +378,7 @@ function manageService() {
     fs.writeFileSync(path.join(daemonDir, `${SERVICE_ID}.exe.config`),
         fs.readFileSync(path.join(path.dirname(winswSrc), 'winsw.exe.config')));
     fs.writeFileSync(path.join(daemonDir, `${SERVICE_ID}.xml`), serviceXml());
-    winsw(daemonDir, 'install');
+    winsw('install');
     // Boot survival + crash recovery. The bundled WinSW 1.x predates
     // <onfailure>, so recovery lives in the SCM itself. 30s restart covers
     // transient fatal errors (port pool exhausted); permanent ones (invalid
@@ -378,7 +387,7 @@ function manageService() {
     spawnSync('sc', ['config', SERVICE_ID, 'start=', 'auto'], { stdio: 'inherit' });
     spawnSync('sc', ['failure', SERVICE_ID, 'reset=', '99999',
         'actions=', 'restart/30000/restart/30000/restart/30000'], { stdio: 'inherit' });
-    winsw(daemonDir, 'start');
+    winsw('start');
 
     const running = serviceRunning();
     console.log(running
@@ -387,28 +396,147 @@ function manageService() {
     process.exit(running ? 0 : 1);
 }
 
-if (STARTUP || REMOVE) {
-    if (process.platform !== 'win32') {
-        console.error('--startup/--remove manage a Windows service. On Linux run hrok under systemd/pm2 instead.');
-        process.exit(1);
+// --- Linux (systemd) / macOS (launchd). Default: system-level unit, runs
+// as the user who invoked sudo, starts at boot. --user: per-user unit in
+// $HOME, no sudo; starts at login (Linux: at boot too if linger is on).
+// Either way: restart every 30s on exit, re-running --startup replaces it.
+const MAC = process.platform === 'darwin';
+const HOME = process.env.HOME || '';
+const UNIX_USER = process.env.SUDO_USER || 'root';
+const UNIT_PATH = MAC
+    ? (USER_MODE ? path.join(HOME, 'Library/LaunchAgents') : '/Library/LaunchDaemons') + `/${SERVICE_ID}.plist`
+    : (USER_MODE ? path.join(HOME, '.config/systemd/user') : '/etc/systemd/system') + `/${SERVICE_ID}.service`;
+const MAC_LOG = USER_MODE ? path.join(HOME, 'Library/Logs', `${SERVICE_ID}.log`) : `/var/log/${SERVICE_ID}.log`;
+const SYSTEMCTL = USER_MODE ? ['systemctl', '--user'] : ['systemctl'];
+const LAUNCHD_DOMAIN = USER_MODE ? `gui/${process.getuid?.()}` : 'system';
+
+// ExecStart quoting: \ and " escaped, % -> %% (specifiers), $ -> $$ (env).
+// Control chars are rejected before we get here, so no line injection.
+function systemdUnit() {
+    const q = s => `"${String(s).replace(/[\\"]/g, '\\$&').replace(/%/g, '%%').replace(/\$/g, '$$$$')}"`;
+    return [
+        '[Unit]',
+        `Description=hrok tunnel ${SERVICE_ID}`,
+        // User managers can't see system targets; the client retries anyway.
+        ...(USER_MODE ? [] : ['Wants=network-online.target', 'After=network-online.target']),
+        '',
+        '[Service]',
+        `ExecStart=${SERVICE_CMD.map(q).join(' ')}`,
+        ...(USER_MODE ? [] : [`User=${UNIX_USER}`]),
+        'Restart=always',
+        'RestartSec=30',
+        '',
+        '[Install]',
+        `WantedBy=${USER_MODE ? 'default.target' : 'multi-user.target'}`,
+    ].join('\n') + '\n';
+}
+
+function launchdPlist() {
+    const s = v => `<string>${xmlEsc(v)}</string>`;
+    return [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
+        '<plist version="1.0"><dict>',
+        `  <key>Label</key>${s(SERVICE_ID)}`,
+        `  <key>ProgramArguments</key><array>${SERVICE_CMD.map(s).join('')}</array>`,
+        ...(USER_MODE ? [] : [`  <key>UserName</key>${s(UNIX_USER)}`]),
+        '  <key>RunAtLoad</key><true/>',
+        '  <key>KeepAlive</key><true/>',
+        '  <key>ThrottleInterval</key><integer>30</integer>',
+        `  <key>StandardOutPath</key>${s(MAC_LOG)}`,
+        `  <key>StandardErrorPath</key>${s(MAC_LOG)}`,
+        '</dict></plist>',
+    ].join('\n') + '\n';
+}
+
+function manageUnix() {
+    const run = (cmd, ...a) => spawnSync(cmd, a, { stdio: 'inherit' }).status;
+    const quiet = (cmd, ...a) => spawnSync(cmd, a, { stdio: 'ignore' }).status;
+    const installed = fs.existsSync(UNIT_PATH);
+    // Stop first for both --remove and an updating --startup; ok to fail.
+    if (installed) MAC ? quiet('launchctl', 'bootout', `${LAUNCHD_DOMAIN}/${SERVICE_ID}`) : quiet(...SYSTEMCTL, 'disable', '--now', SERVICE_ID);
+
+    if (REMOVE) {
+        if (!installed) { console.log(`Service '${SERVICE_ID}' is not installed.`); process.exit(0); }
+        fs.rmSync(UNIT_PATH, { force: true });
+        if (!MAC) run(...SYSTEMCTL, 'daemon-reload');
+        console.log(`Service '${SERVICE_ID}' removed.`);
+        process.exit(0);
     }
+
+    console.log(`${installed ? 'Updating' : 'Installing'} ${USER_MODE ? 'user ' : ''}service '${SERVICE_ID}': hrok ${SERVICE_ARGS.join(' ')}`);
+    fs.mkdirSync(path.dirname(UNIT_PATH), { recursive: true });
+    fs.writeFileSync(UNIT_PATH, MAC ? launchdPlist() : systemdUnit());
+    let running;
+    if (MAC) {
+        // launchd may open the log as UserName — pre-create it owned by them.
+        fs.mkdirSync(path.dirname(MAC_LOG), { recursive: true });
+        fs.closeSync(fs.openSync(MAC_LOG, 'a'));
+        if (!USER_MODE) run('chown', UNIX_USER, MAC_LOG);
+        run('launchctl', 'bootstrap', LAUNCHD_DOMAIN, UNIT_PATH);
+        running = quiet('launchctl', 'print', `${LAUNCHD_DOMAIN}/${SERVICE_ID}`) === 0;
+    } else {
+        run(...SYSTEMCTL, 'daemon-reload');
+        run(...SYSTEMCTL, 'enable', '--now', SERVICE_ID);
+        running = quiet(...SYSTEMCTL, 'is-active', '--quiet', SERVICE_ID) === 0;
+        // Without linger the user manager (and the tunnel) dies at logout
+        // and only starts at login. Self-enabling is usually allowed by polkit.
+        if (USER_MODE && quiet('loginctl', 'enable-linger') !== 0) {
+            console.log(`Note: runs only while you're logged in. For boot start: sudo loginctl enable-linger ${process.env.USER || '$USER'}`);
+        }
+    }
+    const logs = MAC ? MAC_LOG : `journalctl ${USER_MODE ? '--user-unit' : '-u'} ${SERVICE_ID} -f`;
+    console.log(running
+        ? `Service '${SERVICE_ID}' installed and running. Logs: ${logs}`
+        : `Service '${SERVICE_ID}' installed but NOT running — check ${logs}`);
+    process.exit(running ? 0 : 1);
+}
+
+if (STARTUP || REMOVE) {
     // Validate before writing anything: a bad subdomain would just fatal-loop
-    // as a service (server rejects it every 30s forever).
+    // as a service (server rejects it every 30s forever). Control chars
+    // could inject lines into the unit/XML files.
     if (REQUESTED_SUBDOMAIN && !SUBDOMAIN_RE.test(REQUESTED_SUBDOMAIN)) {
         console.error(`Invalid subdomain '${REQUESTED_SUBDOMAIN}'.`);
         process.exit(1);
     }
-    if (!isAdmin()) {
-        console.log('Requesting administrator rights (accept the UAC prompt)...');
-        relaunchElevated();
-        const installed = serviceInstalled();
-        const ok = REMOVE ? !installed : installed;
-        console.log(ok
-            ? (REMOVE ? `Service '${SERVICE_ID}' removed.` : `Service '${SERVICE_ID}' is ${serviceRunning() ? 'running' : 'installed'}.`)
-            : 'Operation failed or the UAC prompt was declined — check the elevated console output.');
-        process.exit(ok ? 0 : 1);
+    if (SERVICE_ARGS.some(a => /[\x00-\x1f]/.test(a))) {
+        console.error('Flag values must not contain control characters.');
+        process.exit(1);
     }
-    manageService();
+    // npx runs from a cache dir that gets cleaned — the service would vanish.
+    if (STARTUP && /[\\/]_npx[\\/]/.test(SELF[SELF.length - 1])) {
+        console.error('--startup needs a permanent install: npm i -g @hmdlohar/hrok, then hrok --startup ...');
+        process.exit(1);
+    }
+    if (process.platform === 'win32') {
+        if (USER_MODE) {
+            console.error('--user is Linux/macOS only. On Windows use --startup (one UAC prompt).');
+            process.exit(1);
+        }
+        if (!isAdmin()) {
+            console.log('Requesting administrator rights (accept the UAC prompt)...');
+            relaunchElevated();
+            const installed = serviceInstalled();
+            const ok = REMOVE ? !installed : installed;
+            console.log(ok
+                ? (REMOVE ? `Service '${SERVICE_ID}' removed.` : `Service '${SERVICE_ID}' is ${serviceRunning() ? 'running' : 'installed'}.`)
+                : 'Operation failed or the UAC prompt was declined — check the elevated console output.');
+            process.exit(ok ? 0 : 1);
+        }
+        manageWindows();
+    } else if (MAC || fs.existsSync('/run/systemd/system')) {
+        // Absolute node + script paths, so sudo's secure_path never has to
+        // find node (nvm installs live in $HOME, invisible to `sudo hrok`).
+        if (!USER_MODE && process.getuid() !== 0) {
+            console.log('Needs root — re-running with sudo (or use --user for a no-sudo user service)...');
+            process.exit(spawnSync('sudo', [...SELF, ...args], { stdio: 'inherit' }).status ?? 1);
+        }
+        manageUnix();
+    } else {
+        console.error('--startup/--remove need systemd (Linux), launchd (macOS) or Windows. Run hrok under pm2 or your init system instead.');
+        process.exit(1);
+    }
 } else {
     connect();
 }

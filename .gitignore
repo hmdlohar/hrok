@@ -5,3 +5,4 @@ Caddyfile
 caddy.log
 .caddy.pid
 *.tmp
+*.tgz

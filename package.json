@@ -1,8 +1,7 @@
 {
-  "name": "hrok",
+  "name": "@hmdlohar/hrok",
   "version": "1.0.0",
   "description": "Grumpy minimalist tunnel daemon: expose a local TCP port on a public subdomain.",
-  "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "test": "node e2e.js",
@@ -27,5 +26,14 @@
     "assets": [
       "node_modules/node-windows/bin/winsw/*"
     ]
+  },
+  "files": [
+    "client.js"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

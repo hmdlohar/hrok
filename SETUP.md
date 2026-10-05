@@ -186,8 +186,57 @@ Notes for support:
   The wire protocol is stable, so old clients keep working against a
   newer server — upgrading clients is optional unless release notes say
   otherwise.
-- Linux end users: run `client.js` under pm2/systemd — `--startup` is
-  Windows-only and exits 1 elsewhere.
+
+## 8. npm clients (Windows / Linux / macOS, Node ≥20)
+
+Publishing (maintainer, once per release): bump `version` in
+`package.json`, `npm login`, `npm publish`. Only `client.js` ships.
+
+End users:
+
+```bash
+npm i -g @hmdlohar/hrok
+hrok --server=ws://<VPS_IP>:8081 --local=3000 --subdomain=myapp
+npx @hmdlohar/hrok --local=3000 ...   # one-off, no install (not with --startup)
+```
+
+Start with the machine — same verbs on every OS:
+
+```bash
+hrok --startup --server=ws://<VPS_IP>:8081 --local=3000 --subdomain=myapp
+hrok --remove --subdomain=myapp
+```
+
+Don't type `sudo hrok` — with nvm, sudo can't find node. hrok asks for
+sudo itself, passing absolute paths.
+
+No sudo at all? Add `--user` (Linux/macOS) for a per-user service:
+
+```bash
+hrok --startup --user --server=ws://<VPS_IP>:8081 --local=3000 --subdomain=myapp
+hrok --remove --user --subdomain=myapp
+# Linux logs: journalctl --user-unit hrok-myapp -f
+# macOS logs: ~/Library/Logs/hrok-myapp.log
+```
+
+Linux `--user` also runs at boot if linger is on (hrok tries
+`loginctl enable-linger`; if denied, ask an admin for
+`sudo loginctl enable-linger <you>`). macOS `--user` starts at login only.
+
+- **Linux:** asks for sudo; installs systemd unit `hrok-myapp` running
+  as you. Logs: `journalctl -u hrok-myapp -f`. Needs systemd — on
+  Alpine etc. use pm2 instead.
+- **macOS:** asks for sudo; installs `/Library/LaunchDaemons/hrok-myapp.plist`.
+  Logs: `/var/log/hrok-myapp.log`.
+- **Windows:** one UAC prompt, like the exe. Files + logs in
+  `%ProgramData%\hrok\`.
+- **Upgrade:** `npm i -g @hmdlohar/hrok`, then restart the service
+  (`sudo systemctl restart hrok-myapp` / `sc stop` + `sc start` /
+  `sudo launchctl kickstart -k system/hrok-myapp`; with `--user`:
+  `systemctl --user restart hrok-myapp` /
+  `launchctl kickstart -k gui/$(id -u)/hrok-myapp`).
+- **Changed Node version (nvm, reinstall)?** The service pins the old
+  node path — run `--startup` again.
 
 ## Maintenance
 

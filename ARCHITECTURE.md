@@ -33,8 +33,7 @@ TCP sessions via `sessionId`.
   sessions in `activeConnections` (sessionId →
   `{ sock, connected, pending, dead, sent }`). Reconnects with backoff on
   drop; watchdog kills half-open links. Runs well as a service
-  (pm2/systemd on Linux, `--startup` on Windows — see
-  Windows service & distribution).
+  (`--startup` on Windows/Linux/macOS — see Service & distribution).
 - **`CaddyManager.js`** — owns ONLY the snippet file next to the
   Caddyfile (`hrok-tunnels.caddy`), regenerating it from `clientTunnels`
   on every assign/disconnect (`.bak` kept). On first write it appends a
@@ -77,7 +76,7 @@ so raw TCP bytes must be encoded; ~33% overhead, accepted deliberately).
  Flag values are everything after the first `=`.
  `--local` accepts `PORT` or `HOST:PORT` (default `127.0.0.1:3000`,
  invalid → that default). Extra verbs: `--startup` / `--remove`
- (Windows only, see below).
+ (see Service & distribution).
 
  ## Heartbeat & reconnect (service readiness)
 
@@ -122,10 +121,56 @@ so raw TCP bytes must be encoded; ~33% overhead, accepted deliberately).
     and is surfaced as-is. Dial failures are logged with the OS error
     code; the retry is absorbed silently.
 
- ## Windows service & distribution (`--startup` / `--remove`)
+ ## Service & distribution (`--startup` / `--remove`)
 
- End users don't install Node. The client is shipped as a self-contained
- exe (`dist/hrok.exe`) and registers itself as a Windows service:
+ Two ways to ship the client, same CLI:
+
+ - **Exe** (`dist/hrok.exe`, no Node needed) — details below.
+ - **npm** (`npm i -g @hmdlohar/hrok`, needs Node ≥20). `package.json` `files`
+   publishes only `client.js`. The service command line is then
+   `node <realpath of client.js> <flags>` instead of the exe
+   (`SELF` in client.js; `process.pkg` tells the two apart). Caveats:
+   the service pins the absolute node path, so switching Node versions
+   (nvm) or reinstalling Node means `--startup` again. `npm i -g @hmdlohar/hrok`
+   upgrades in place — restart the service to pick it up. `--startup`
+   from `npx` refuses (its cache dir gets cleaned → dead service).
+
+ `--startup` registers a boot-time service per OS, native tools only:
+
+ - **Linux (systemd):** `/etc/systemd/system/hrok-<sub>.service`,
+   `User=$SUDO_USER`, `Restart=always`, `RestartSec=30`,
+   `enable --now`. Non-root re-execs itself under `sudo`. Args are
+   quoted in `ExecStart` with `%`→`%%`, `$`→`$$`; control chars in
+   flags are rejected up front (no line injection into the unit).
+   Logs: `journalctl -u hrok-<sub>`. No systemd (Alpine, old WSL) →
+   exit 1, use pm2.
+ - **macOS (launchd):** `/Library/LaunchDaemons/hrok-<sub>.plist`,
+   `UserName` = `$SUDO_USER`, `RunAtLoad` + `KeepAlive`,
+   `ThrottleInterval 30`, loaded with `launchctl bootstrap system`.
+   Logs: `/var/log/hrok-<sub>.log` (pre-created, chowned to the user).
+   ponytail: untested on real macOS hardware — verify on first Mac user.
+ - **Windows (WinSW):** below. Daemon dir is `<exe dir>\daemon\` for
+   the exe, `%ProgramData%\hrok\` under npm (not Node's install dir).
+ - **`--user` (Linux/macOS, no sudo):** per-user unit instead —
+   `~/.config/systemd/user/hrok-<sub>.service` (`systemctl --user`,
+   `WantedBy=default.target`, no `User=`/network-online: user managers
+   can't see system targets, the client's reconnect covers it) or
+   `~/Library/LaunchAgents/hrok-<sub>.plist` (`launchctl bootstrap
+   gui/<uid>`, logs `~/Library/Logs/hrok-<sub>.log`). Starts at login,
+   not boot. Linux: hrok runs `loginctl enable-linger` (self-allowed by
+   polkit on most distros) so it starts at boot and survives logout; if
+   that's denied it prints the `sudo loginctl enable-linger` hint.
+   macOS has no linger — LaunchAgents need a login. Windows: `--user`
+   exits 1 (an HKCU Run key has no crash restart and shows a console
+   window; not worth it — use the UAC service).
+ - **sudo + nvm:** the root re-exec is `sudo <abs node> <abs client.js>`
+   (`SELF`), never `sudo hrok`, so sudo's `secure_path` never needs to
+   find an nvm node in `$HOME`. Users must not type `sudo hrok`
+   themselves — run `hrok --startup`, it elevates itself.
+ - All of them: `--startup` again replaces the service with new flags;
+   `--remove` (with the same `--user`/no `--user`) stops + deletes it.
+
+ Windows details:
 
  - **Packaging:** `@yao-pkg/pkg` (maintained fork of vercel/pkg) bundles
    client.js + Node 22 into one exe. `npm run build:win` (also
@@ -165,8 +210,6 @@ so raw TCP bytes must be encoded; ~33% overhead, accepted deliberately).
  - **Releases:** GitHub Action (`.github/workflows/release.yml`) builds
    the exe on `v*` tags and attaches it to a GitHub release
    (`git tag v1.0.0 && git push origin v1.0.0`).
- - **Linux:** `--startup`/`--remove` exit 1 with a pointer to
-   systemd/pm2. Deliberate — real Linux service support is a later task.
 
  ## Concurrency model (read this before touching it)
 
@@ -275,7 +318,8 @@ npm test   # e2e.js: assign + echo, port-conflict skip, loopback-only
 # local down (fast close) -> local up (works, no restart) ->
 # server kill -> client reconnects + reclaims subdomain
 # if client.js touched: npm run build:linux and rerun the above
-# through dist/hrok (the exe), plus ./dist/hrok --startup -> exit 1
+# through dist/hrok (the exe); service verbs: hrok --startup ... ->
+# systemctl status hrok-<sub> -> hrok --remove ... (sudo prompt)
 ```
 
 If your change touches the protocol, ports, Caddy interaction, lifecycle,
